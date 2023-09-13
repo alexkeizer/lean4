@@ -9,8 +9,11 @@ import Lean.Meta.Tactic.Clear
 import Lean.Meta.Tactic.Subst
 import Lean.Meta.Tactic.Assert
 import Lean.Meta.Tactic.Intro
+import Lean.Meta.Tactic.Injection.InjectionInfo
 
 namespace Lean.Meta
+
+builtin_initialize registerTraceClass `Meta.Tactic.injection
 
 def getCtorNumPropFields (ctorInfo : ConstructorVal) : MetaM Nat := do
   forallTelescopeReducing ctorInfo.type fun xs _ => do
@@ -30,35 +33,52 @@ def injectionCore (mvarId : MVarId) (fvarId : FVarId) : MetaM InjectionResultCor
     let decl ← fvarId.getDecl
     let type ← whnf decl.type
     let go (type prf : Expr) : MetaM InjectionResultCore := do
+      trace[Meta.Tactic.injection] "Applying injectivity to: {type}"
+
       match type.eq? with
       | none           => throwTacticEx `injection mvarId "equality expected"
       | some (_, a, b) =>
-        let a ← whnf a
-        let b ← whnf b
         let target ← mvarId.getType
-        let env ← getEnv
-        match a.isConstructorApp? env, b.isConstructorApp? env with
-        | some aCtor, some bCtor =>
-          let val ← mkNoConfusion target prf
-          if aCtor.name != bCtor.name then
-            mvarId.assign val
-            return InjectionResultCore.solved
-          else
-            let valType ← inferType val
-            let valType ← whnf valType
-            match valType with
-            | Expr.forallE _ newTarget _ _ =>
-              let newTarget := newTarget.headBeta
-              let tag ← mvarId.getTag
-              let newMVar ← mkFreshExprSyntheticOpaqueMVar newTarget tag
-              mvarId.assign (mkApp val newMVar)
-              let mvarId ← newMVar.mvarId!.tryClear fvarId
-              /- Recall that `noConfusion` does not include equalities for
-                 propositions since they are trivial due to proof irrelevance. -/
-              let numPropFields ← getCtorNumPropFields aCtor
-              return InjectionResultCore.subgoal mvarId (aCtor.numFields - numPropFields)
-            | _ => throwTacticEx `injection mvarId "ill-formed noConfusion auxiliary construction"
-        | _, _ => throwTacticEx `injection mvarId "equality of constructor applications expected"
+
+        match ←getCustomInjection? a b with
+        | some inj =>
+          let res ← inj.applyTo decl.toExpr
+          let resultType ← inferType res
+          trace[Meta.Tactic.injection] 
+            "Applying custom injection theorem {inj.declName} yielded:\n\t{resultType}"
+          
+          let newTarget := Expr.forallE .anonymous resultType target .default
+          let newMVar ← mkFreshExprSyntheticOpaqueMVar newTarget (←mvarId.getTag)
+          mvarId.assign (mkApp newMVar res)
+          return InjectionResultCore.subgoal newMVar.mvarId! 1
+
+        | none =>
+          trace[Meta.Tactic.injection] "No custom injectivity theorem found"
+          let a ← whnf a
+          let b ← whnf b
+          let env ← getEnv
+          match a.isConstructorApp? env, b.isConstructorApp? env with
+          | some aCtor, some bCtor =>
+            let val ← mkNoConfusion target prf
+            if aCtor.name != bCtor.name then
+              mvarId.assign val
+              return InjectionResultCore.solved
+            else
+              let valType ← inferType val
+              let valType ← whnf valType
+              match valType with
+              | Expr.forallE _ newTarget _ _ =>
+                let newTarget := newTarget.headBeta
+                let tag ← mvarId.getTag
+                let newMVar ← mkFreshExprSyntheticOpaqueMVar newTarget tag
+                mvarId.assign (mkApp val newMVar)
+                let mvarId ← newMVar.mvarId!.tryClear fvarId
+                /- Recall that `noConfusion` does not include equalities for
+                  propositions since they are trivial due to proof irrelevance. -/
+                let numPropFields ← getCtorNumPropFields aCtor
+                return InjectionResultCore.subgoal mvarId (aCtor.numFields - numPropFields)
+              | _ => throwTacticEx `injection mvarId "ill-formed noConfusion auxiliary construction"
+          | _, _ => throwTacticEx `injection mvarId "equality of constructor applications expected"
     let prf := mkFVar fvarId
     if let some (α, a, β, b) := type.heq? then
       if (← isDefEq α β) then

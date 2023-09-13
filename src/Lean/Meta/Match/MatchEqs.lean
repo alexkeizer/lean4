@@ -288,7 +288,8 @@ private def substSomeVar (mvarId : MVarId) : MetaM (Array MVarId) := mvarId.with
   Helper method for proving a conditional equational theorem associated with an alternative of
   the `match`-eliminator `matchDeclName`. `type` contains the type of the theorem. -/
 partial def proveCondEqThm (matchDeclName : Name) (type : Expr) : MetaM Expr := withLCtx {} {} do
-  let type ← instantiateMVars type
+  let type ← instantiateMVars type 
+  trace[Meta.Match.matchEqs] "proveCondEqThm type = {type}"
   forallTelescope type fun ys target => do
     let mvar0  ← mkFreshExprSyntheticOpaqueMVar target
     trace[Meta.Match.matchEqs] "proveCondEqThm {mvar0.mvarId!}"
