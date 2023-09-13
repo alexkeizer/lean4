@@ -7,7 +7,6 @@ import Lean.Meta.AppBuilder
 import Lean.Meta.Basic
 import Lean.Meta.Check
 import Lean.ScopedEnvExtension
-import Lean.Util.Recognizers
 
 namespace Lean.Meta
 
@@ -16,10 +15,6 @@ structure InjectionInfo where
   declName : Name
   /-- The number of arguments *before* the final `f ... = f ...` hypothesis -/
   args : Nat
-  /-- The consequents of the injectivity theorem. 
-      E.g., if the resulting prop is `A ∧ B ∧ C`, then there are three consequents 
-      (`A`, `B` and `C`) -/
-  consequents : List Expr
   deriving Inhabited, Repr
 
 structure CustomInjection where
@@ -56,9 +51,9 @@ open Expr in
   Register a theorem which has an equality hypothesis of the form `f ... = g ...`, where 
   `f` and `g` are constants, as an injectivity theorem for the pair `(f, g)`
 -/
-partial def mkCustomInjection (declName : Name) : MetaM CustomInjection := do
+def mkCustomInjection (declName : Name) : MetaM CustomInjection := do
   let info ← getConstInfo declName
-  forallTelescopeReducing info.type fun xs resultType => do
+  forallTelescopeReducing info.type fun xs _ => do
     if xs.size = 0 then
       throwError "Expected a hypothesis of the form `f ... = g ...`, but {declName} is a constant"
     else
@@ -76,16 +71,10 @@ partial def mkCustomInjection (declName : Name) : MetaM CustomInjection := do
         lhsName, rhsName,
         injInfo := {
           declName
-          args := xs.size - 1,
-          -- consequents := consequents resultType
-          consequents := [resultType]
+          args := xs.size - 1
         }
       }  
-  where 
-    consequents (e : Expr) : List Expr :=
-      match and? e with
-        | some (e₁, e₂) => e₁ :: consequents e₂
-        | none => [e]
+    
 
 def addCustomInjection (declName : Name) (attrKind : AttributeKind) : MetaM Unit := do
   let e ← mkCustomInjection declName

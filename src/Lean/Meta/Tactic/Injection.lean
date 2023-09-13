@@ -10,6 +10,7 @@ import Lean.Meta.Tactic.Subst
 import Lean.Meta.Tactic.Assert
 import Lean.Meta.Tactic.Intro
 import Lean.Meta.Tactic.Injection.InjectionInfo
+import Lean.Util.Recognizers
 
 namespace Lean.Meta
 
@@ -27,7 +28,48 @@ inductive InjectionResultCore where
   | solved
   | subgoal (mvarId : MVarId) (numNewEqs : Nat)
 
-def injectionCore (mvarId : MVarId) (fvarId : FVarId) : MetaM InjectionResultCore :=
+partial def applyCustomInjection (mvarId : MVarId) (fvarId : FVarId) (inj : InjectionInfo) : 
+    MetaM InjectionResultCore := do
+  let target ← mvarId.getType
+  let res ← inj.applyTo (.fvar fvarId)
+  let resultType ← inferType res
+
+  /- If the consequent of the injectivity theorem is `p ∧ q ∧ r`, then we want to add three separate
+    local hypotheses, one for `p`, one for `q` and one for `r`.
+    Thus, the new goal becomes `⊢ p → q → r → originalGoal `-/
+  let rec mkConsequents (resultType : Expr) : List Expr :=
+    match resultType.and? with
+      | some (e₁, e₂) => e₁ :: mkConsequents e₂
+      | none => [resultType]
+  let consequents := mkConsequents resultType
+  let numConsequents := consequents.length
+
+  trace[Meta.Tactic.injection] 
+    "Applying custom injection theorem {inj.declName} yielded:\n\t{consequents}"
+        
+  let rec mkTarget : List Expr → Expr 
+    | [] => target
+    | e::es => .forallE .anonymous e (mkTarget es) .default
+  let newTarget := mkTarget consequents
+
+  let newMVar ← mkFreshExprSyntheticOpaqueMVar newTarget (←mvarId.getTag)
+
+  /- Now we build as assignment for the old goal using the new goals mvar 
+      Continueing the three consequent example, this means we need to apply the new goal's mvar
+      to `res.left`, `res.right.left` and `res.right.right`, to fill in all newly added hypotheses
+  -/
+  let rec mkAssign (newProof : Expr) (res : Expr) : Nat → MetaM Expr
+    | 0 => pure <| newProof
+    | 1 => pure <| mkApp newProof res
+    | n+2 => do 
+      let resLeft ← mkAppM ``And.left #[res]
+      let resRight ← mkAppM ``And.right #[res]
+      mkAssign (mkApp newProof resLeft) resRight (n+1)
+  mvarId.assign (←mkAssign newMVar res numConsequents)
+  return InjectionResultCore.subgoal newMVar.mvarId! numConsequents
+
+
+partial def injectionCore (mvarId : MVarId) (fvarId : FVarId) : MetaM InjectionResultCore :=
   mvarId.withContext do
     mvarId.checkNotAssigned `injection
     let decl ← fvarId.getDecl
@@ -41,17 +83,7 @@ def injectionCore (mvarId : MVarId) (fvarId : FVarId) : MetaM InjectionResultCor
         let target ← mvarId.getType
 
         match ←getCustomInjection? a b with
-        | some inj =>
-          let res ← inj.applyTo decl.toExpr
-          let resultType ← inferType res
-          trace[Meta.Tactic.injection] 
-            "Applying custom injection theorem {inj.declName} yielded:\n\t{resultType}"
-          
-          let newTarget := Expr.forallE .anonymous resultType target .default
-          let newMVar ← mkFreshExprSyntheticOpaqueMVar newTarget (←mvarId.getTag)
-          mvarId.assign (mkApp newMVar res)
-          return InjectionResultCore.subgoal newMVar.mvarId! 1
-
+        | some inj => applyCustomInjection mvarId fvarId inj
         | none =>
           trace[Meta.Tactic.injection] "No custom injectivity theorem found"
           let a ← whnf a
